@@ -73,9 +73,11 @@
 
 <script>
 // ---------------------------------------------------------------- settings
-const RELAY = "wss://barrelofmonkeys.cyberdetective.workers.dev"; // <- your relay address
-const SEND_MS = 33;          // check for changes ~30 times a second
-const KEEPALIVE_MS = 1000;   // always send at least once a second (also measures ping)
+const RELAY = "wss://barrelofmonkeys.cyberdetective.workers.dev";
+const ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
+const TICK_MS = 16;          // ~60 checks a second
+const RELAY_MIN_MS = 33;     // over the relay: at most ~30 updates a second, only on change
+const PING_MS = 1000;        // measure ping once a second (doubles as a keepalive)
 const MIN_PRESS_MS = 60;     // super-quick taps stay "down" this long so the game sees them
 const DEADZONE = 0.12;
 const STICK_RADIUS = 60;     // px of thumb travel for a full push
@@ -83,7 +85,9 @@ const STICK_RADIUS = 60;     // px of thumb travel for a full push
 // ---------------------------------------------------------------- state
 const $ = (id) => document.getElementById(id);
 const state = { x: 0, y: 0, b: 0 };  // b bits: 1 move1, 2 move2, 4 move3, 8 confirm, 16 back
-let ws = null, room = "", lastKey = "", lastSentAt = 0, retryTimer = 0, playerText = "";
+let ws = null, room = "", retryTimer = 0, playerText = "";
+let lastKey = "", lastRelayAt = 0, lastPingAt = 0, ping = null;
+let pc = null, dc = null, direct = false, noDirect = false, remoteReady = false, pendingIce = [];
 
 // A stable id for this phone, so a dropped connection rejoins as the same player.
 function makeId() {
@@ -118,6 +122,7 @@ function join() {
 function backToJoin(text) {
   room = "";
   clearTimeout(retryTimer);
+  closeDirect();
   $("pad").classList.remove("on");
   $("join").classList.add("on");
   $("msg").textContent = text;
@@ -132,48 +137,129 @@ document.addEventListener("visibilitychange", () => {
   if (!ws) connect();
 });
 
-// ---------------------------------------------------------------- connection
+// ---------------------------------------------------------------- relay connection
 function setStatus(text) { $("status").textContent = text; }
+
+function showLink() {
+  $("ping").textContent = `${direct ? "direct" : "relay"} · ${ping === null ? "--" : ping} ms`;
+}
+
+function sendRelay(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
 
 function connect() {
   clearTimeout(retryTimer);
   setStatus("Connecting...");
   ws = new WebSocket(`${RELAY}/phone?room=${room}&id=${phoneId}`);
-  ws.onopen = () => { lastKey = ""; lastSentAt = 0; setStatus(playerText || "Connected"); };
-  ws.onmessage = (e) => {
-    let d;
-    try { d = JSON.parse(e.data); } catch (err) { return; }
-    if (d.slot) { playerText = `You are P${d.slot}`; setStatus(playerText); }
-    if (d.color) document.documentElement.style.setProperty("--player", "#" + d.color);
-    if (typeof d.pong === "number") $("ping").textContent = `${Date.now() - d.pong} ms`;
+  ws.onopen = () => {
+    lastKey = "";
+    setStatus(playerText || "Connected");
+    if (!direct) startDirect();
   };
+  ws.onmessage = (e) => onGameMessage(e.data);
   ws.onclose = (e) => {
     ws = null;
     if (!room) return;
     if (e.code === 4004) return backToJoin("No game with that code. Check the big screen.");
     if (e.code === 4005) return backToJoin("That game is full.");
     if (e.code === 4000) return setStatus("Controller opened in another tab.");
+    if (e.code === 4002) closeDirect();  // the game itself closed
     setStatus(e.code === 4002 ? "Game closed. Waiting for it..." : "Connection lost. Reconnecting...");
     retryTimer = setTimeout(connect, 2000);
   };
 }
 
+// Messages from the game arrive here, over the relay or the direct link.
+function onGameMessage(text) {
+  let d;
+  try { d = JSON.parse(text); } catch (err) { return; }
+  if (d.slot) { playerText = `You are P${d.slot}`; setStatus(playerText); }
+  if (typeof d.note === "string") { playerText = d.note; setStatus(d.note); }
+  if (d.color) document.documentElement.style.setProperty("--player", "#" + d.color);
+  if (typeof d.pong === "number") { ping = Date.now() - d.pong; showLink(); }
+  if (d.rtc === "off") { noDirect = true; closeDirect(); }  // this game build can't go direct
+  if (d.type === "answer" && pc) {
+    pc.setRemoteDescription({ type: "answer", sdp: d.sdp })
+      .then(() => { remoteReady = true; pendingIce.forEach(addIce); pendingIce = []; })
+      .catch(closeDirect);
+  }
+  if (d.ice && pc) {
+    if (remoteReady) addIce(d.ice); else pendingIce.push(d.ice);
+  }
+}
+
+// ---------------------------------------------------------------- direct link (WebRTC)
+// The relay only introduces phone and game; then they talk straight across the
+// Wi-Fi. If that can't connect, the relay keeps working as before.
+async function startDirect() {
+  if (noDirect || !window.RTCPeerConnection) return;
+  closeDirect();
+  const myPc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  pc = myPc;
+  dc = myPc.createDataChannel("input", { ordered: false, maxRetransmits: 0 });
+  dc.onopen = () => { if (pc === myPc) { direct = true; showLink(); } };
+  dc.onclose = () => { if (pc === myPc) { direct = false; showLink(); } };
+  dc.onmessage = (e) => onGameMessage(e.data);
+
+  let offerSent = false;
+  const early = [];
+  myPc.onicecandidate = (e) => {
+    if (!e.candidate || !e.candidate.candidate) return;
+    const ice = { media: e.candidate.sdpMid, index: e.candidate.sdpMLineIndex, name: e.candidate.candidate };
+    if (offerSent) sendRelay({ t: "sig", ice }); else early.push(ice);
+  };
+  myPc.onconnectionstatechange = () => {
+    if (pc === myPc && (myPc.connectionState === "failed" || myPc.connectionState === "closed")) closeDirect();
+  };
+  try {
+    await myPc.setLocalDescription(await myPc.createOffer());
+    sendRelay({ t: "sig", type: "offer", sdp: myPc.localDescription.sdp });
+    offerSent = true;
+    early.forEach((ice) => sendRelay({ t: "sig", ice }));
+  } catch (err) {
+    closeDirect();
+  }
+}
+
+function addIce(c) {
+  if (pc) pc.addIceCandidate({ candidate: c.name, sdpMid: c.media, sdpMLineIndex: c.index }).catch(() => {});
+}
+
+function closeDirect() {
+  const oldPc = pc, oldDc = dc;
+  pc = null;
+  dc = null;
+  direct = false;
+  remoteReady = false;
+  pendingIce = [];
+  if (oldDc) { try { oldDc.close(); } catch (e) {} }
+  if (oldPc) { try { oldPc.close(); } catch (e) {} }
+  showLink();
+}
+
 // ---------------------------------------------------------------- sending
 const round2 = (v) => Math.round(v * 100) / 100;
 
-function flush() {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+function flush(force) {
   const now = Date.now();
   const msg = { x: round2(state.x), y: round2(state.y), b: state.b };
+  if (now - lastPingAt >= PING_MS) { msg.p = now; lastPingAt = now; }
+  if (direct && dc && dc.readyState === "open") {
+    // Direct: send every tick. A lost packet doesn't matter; the next one replaces it.
+    try { dc.send(JSON.stringify(msg)); } catch (e) {}
+    return;
+  }
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  // Relay: only send changes (at most ~30 a second) plus the once-a-second ping.
   const key = `${msg.x},${msg.y},${msg.b}`;
-  const keepalive = now - lastSentAt >= KEEPALIVE_MS;
-  if (key === lastKey && !keepalive) return;
-  if (keepalive) msg.p = now;  // the game echoes this back so we can show ping
+  const due = key !== lastKey && now - lastRelayAt >= RELAY_MIN_MS;
+  if (!force && !due && msg.p === undefined) return;
   ws.send(JSON.stringify(msg));
   lastKey = key;
-  lastSentAt = now;
+  lastRelayAt = now;
 }
-setInterval(flush, SEND_MS);
+setInterval(() => flush(false), TICK_MS);
 
 // ---------------------------------------------------------------- joystick (appears under your thumb)
 const zone = $("stick-zone"), base = $("stick-base"), knob = $("stick-knob");
@@ -232,7 +318,7 @@ for (const [name, bit] of Object.entries(BITS)) {
     state.b |= bit;
     el.classList.add("down");
     if (navigator.vibrate) navigator.vibrate(12);
-    flush();
+    flush(true);
     e.preventDefault();
   });
   const release = (e) => {
@@ -240,7 +326,7 @@ for (const [name, bit] of Object.entries(BITS)) {
     pointer = null;
     el.classList.remove("down");
     setTimeout(() => {
-      if (pointer === null) { state.b &= ~bit; flush(); }
+      if (pointer === null) { state.b &= ~bit; flush(true); }
     }, Math.max(0, MIN_PRESS_MS - (Date.now() - downAt)));
   };
   el.addEventListener("pointerup", release);
