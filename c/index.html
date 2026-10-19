@@ -306,7 +306,7 @@ zone.addEventListener("pointerup", endStick);
 zone.addEventListener("pointercancel", endStick);
 
 // ---------------------------------------------------------------- buttons (same layout as a gamepad)
-const BITS = { a: 1 | 8, x: 2, y: 4, b: 16 };  // A = move 1 + confirm, X = move 2, Y = move 3, B = back
+const BITS = { a: 32 | 8, x: 1, y: 2, b: 4 | 16 };  // A = interact + confirm, X/Y/B = moves 1-3, B is also back
 for (const [name, bit] of Object.entries(BITS)) {
   const el = $("btn-" + name);
   let pointer = null, downAt = 0;
