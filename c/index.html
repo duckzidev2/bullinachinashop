@@ -12,8 +12,10 @@
   html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--fg);
       font-family: system-ui, sans-serif; touch-action: none; overscroll-behavior: none; }
   .screen { position: fixed; inset: 0; display: none; }
-  /* No double-tap zoom anywhere you can tap. */
-  button, input, .btn, #typing, #join { touch-action: manipulation; }
+  /* No zoom of any kind on the controller: every touch belongs to the game.
+     (manipulation still allows pinch-zoom, which two thumbs can trigger.) */
+  #pad, #pad * { touch-action: none; }
+  button, input, #typing, #join { touch-action: manipulation; }
   .screen.on { display: block; }
 
   #join.on { display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -62,6 +64,13 @@
       background: var(--player); color: var(--bg); font: 800 24px system-ui, sans-serif; }
   #typing-note { min-height: 1.3em; color: #f2c230; font-size: 18px; text-align: center; }
   #typing-hint { opacity: 0.6; font-size: 14px; }
+  /* Phones only open the keyboard after a tap (a page can't open it by
+     itself), so a big blinking button asks for that tap. */
+  #typing-tap { width: min(90vw, 420px); padding: 18px; border-radius: 12px; background: var(--player);
+      color: #000; font: 800 24px system-ui, sans-serif; text-align: center; animation: blink 1s infinite; }
+  #typing.typing-active #typing-tap { display: none; }
+  @keyframes blink { 50% { opacity: 0.55; } }
+  #version { position: fixed; right: 6px; bottom: 4px; font-size: 11px; opacity: 0.4; pointer-events: none; z-index: 20; }
 </style>
 </head>
 <body>
@@ -89,12 +98,14 @@
 
 <div id="typing">
   <div id="typing-prompt">Type your answer</div>
+  <div id="typing-tap">TAP HERE TO TYPE</div>
   <input id="typing-input" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false" enterkeyhint="send">
   <button id="typing-submit">Submit</button>
   <div id="typing-note"></div>
   <div id="typing-hint">Tap the box to bring up your keyboard</div>
 </div>
 
+<div id="version">controller v4</div>
 <script>
 // ---------------------------------------------------------------- settings
 const RELAY = "wss://barrelofmonkeys.cyberdetective.workers.dev";
@@ -224,17 +235,25 @@ function openTyping(cfg) {
   const input = $("typing-input");
   $("typing-prompt").textContent = cfg.prompt || "Type your answer";
   input.maxLength = cfg.max || 12;
+  // free = a sentence (Fake Dex Entry); otherwise one word in capitals.
+  input.style.textTransform = cfg.free ? "none" : "uppercase";
+  input.style.letterSpacing = cfg.free ? "normal" : "0.12em";
+  input.style.fontSize = cfg.free ? "18px" : "28px";
+  input.setAttribute("autocapitalize", cfg.free ? "sentences" : "characters");
+  input.setAttribute("autocorrect", cfg.free ? "on" : "off");
+  input.inputMode = /kg/i.test(cfg.prompt || "") ? "decimal" : "text";
   input.type = cfg.secret ? "password" : "text";
   input.value = "";
   $("typing-note").textContent = "";
   $("typing").classList.add("on");
+  $("typing").classList.remove("typing-active");
   state.x = 0; state.y = 0; state.b = 0;  // let go of everything while typing
   flush(true);
-  try { input.focus(); } catch (e) {}
+  try { input.focus(); } catch (e) {}  // works on some phones; iPhones need the tap below
 }
 
 function closeTyping() {
-  $("typing").classList.remove("on");
+  $("typing").classList.remove("on", "typing-active");
   $("typing-input").blur();
   resetZoom();  // iOS can leave the page zoomed after typing
 }
@@ -250,6 +269,14 @@ function submitTyping() {
   input.focus();  // keep the keyboard up for the next try
 }
 $("typing-submit").addEventListener("click", submitTyping);
+// Any tap on the typing screen (not Submit) focuses the box: a real tap is
+// what lets the phone open its keyboard.
+$("typing").addEventListener("click", (e) => {
+  if (e.target.id === "typing-submit") return;
+  $("typing-input").focus();
+});
+$("typing-input").addEventListener("focus", () => $("typing").classList.add("typing-active"));
+$("typing-input").addEventListener("blur", () => $("typing").classList.remove("typing-active"));
 $("typing-input").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); submitTyping(); } });
 
 // ---------------------------------------------------------------- direct link (WebRTC)
@@ -401,13 +428,20 @@ for (const [name, bit] of Object.entries(BITS)) {
 // pinch (gesture*), double-tap (dblclick + a second quick touchend), and
 // if a zoom ever slips through, resetZoom() snaps it back to 1x.
 document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+// The pad swallows every raw touch: no double-tap zoom, no pinch, no scroll.
+// (The stick and buttons use pointer events, which still arrive.)
+$("pad").addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
+$("pad").addEventListener("touchend", (e) => e.preventDefault(), { passive: false });
+document.addEventListener("touchstart", (e) => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
 for (const g of ["gesturestart", "gesturechange", "gestureend"]) document.addEventListener(g, (e) => e.preventDefault(), { passive: false });
 document.addEventListener("dblclick", (e) => e.preventDefault(), { passive: false });
 document.addEventListener("contextmenu", (e) => e.preventDefault());
 let lastTouchEnd = 0;
 document.addEventListener("touchend", (e) => {
   const now = Date.now();
-  if (now - lastTouchEnd < 350 && e.target.id !== "typing-input") e.preventDefault();  // 2nd quick tap = no zoom
+  const t = e.target;
+  const typing = t.id === "typing-input" || t.id === "typing-submit" || t.id === "typing-tap" || t.id === "typing";
+  if (now - lastTouchEnd < 350 && !typing) e.preventDefault();  // 2nd quick tap = no zoom
   lastTouchEnd = now;
 }, { passive: false });
 
@@ -421,7 +455,7 @@ function resetZoom() {
 window.addEventListener("orientationchange", () => setTimeout(resetZoom, 200));
 if (window.visualViewport) {
   window.visualViewport.addEventListener("resize", () => {
-    if (window.visualViewport.scale > 1.01 && !$("typing").classList.contains("on")) resetZoom();
+    if (window.visualViewport.scale > 1.01 && !$("typing").classList.contains("typing-active")) resetZoom();
   });
 }
 </script>
