@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta id="viewport" name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#1a1c2c">
 <title>Starter Party Controller</title>
 <style>
@@ -12,6 +12,8 @@
   html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--fg);
       font-family: system-ui, sans-serif; touch-action: none; overscroll-behavior: none; }
   .screen { position: fixed; inset: 0; display: none; }
+  /* No double-tap zoom anywhere you can tap. */
+  button, input, .btn, #typing, #join { touch-action: manipulation; }
   .screen.on { display: block; }
 
   #join.on { display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -46,6 +48,20 @@
   #rotate { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
       background: var(--bg); font-size: 22px; }
   @media (orientation: portrait) { #rotate { display: flex; } }
+
+  /* Text mode: typing games put a text box + Submit button on the phone. */
+  #typing { position: fixed; inset: 0; z-index: 10; display: none; flex-direction: column;
+      align-items: center; justify-content: center; gap: 12px; padding: 16px; background: var(--bg);
+      touch-action: manipulation; }
+  #typing.on { display: flex; }
+  #typing-prompt { font: 700 22px system-ui, sans-serif; text-align: center; }
+  #typing-input { width: min(90vw, 420px); padding: 12px; border: 3px solid var(--player); border-radius: 12px;
+      background: #000; color: var(--fg); font: 700 28px monospace; letter-spacing: 0.12em; text-align: center;
+      text-transform: uppercase; -webkit-user-select: text; user-select: text; }
+  #typing-submit { width: min(90vw, 420px); padding: 16px; border: 0; border-radius: 12px;
+      background: var(--player); color: var(--bg); font: 800 24px system-ui, sans-serif; }
+  #typing-note { min-height: 1.3em; color: #f2c230; font-size: 18px; text-align: center; }
+  #typing-hint { opacity: 0.6; font-size: 14px; }
 </style>
 </head>
 <body>
@@ -69,6 +85,14 @@
   </div>
   <div id="hud"><span id="status">Connecting...</span> · <span id="ping">-- ms</span></div>
   <div id="rotate">Turn your phone sideways</div>
+</div>
+
+<div id="typing">
+  <div id="typing-prompt">Type your answer</div>
+  <input id="typing-input" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false" enterkeyhint="send">
+  <button id="typing-submit">Submit</button>
+  <div id="typing-note"></div>
+  <div id="typing-hint">Tap the box to bring up your keyboard</div>
 </div>
 
 <script>
@@ -110,6 +134,7 @@ function join() {
   room = $("code").value.trim().toUpperCase();
   if (!/^[A-Z]{4}$/.test(room)) { $("msg").textContent = "Codes are 4 letters."; return; }
   $("code").blur();
+  resetZoom();
   $("join").classList.remove("on");
   $("pad").classList.add("on");
   if (document.documentElement.requestFullscreen) {
@@ -187,7 +212,45 @@ function onGameMessage(text) {
   if (d.ice && pc) {
     if (remoteReady) addIce(d.ice); else pendingIce.push(d.ice);
   }
+  if ("text_mode" in d) { if (d.text_mode) openTyping(d.text_mode); else closeTyping(); }
+  if (typeof d.text_note === "string") $("typing-note").textContent = d.text_note;
 }
+
+// ---------------------------------------------------------------- text mode (typing games)
+// The game asks for text with {text_mode: {prompt, max, secret}} and closes it with
+// {text_mode: false}. Typed words go back as {t:"sig", kind:"text", text}: the relay
+// passes "sig" messages straight to the game, so no relay change was needed.
+function openTyping(cfg) {
+  const input = $("typing-input");
+  $("typing-prompt").textContent = cfg.prompt || "Type your answer";
+  input.maxLength = cfg.max || 12;
+  input.type = cfg.secret ? "password" : "text";
+  input.value = "";
+  $("typing-note").textContent = "";
+  $("typing").classList.add("on");
+  state.x = 0; state.y = 0; state.b = 0;  // let go of everything while typing
+  flush(true);
+  try { input.focus(); } catch (e) {}
+}
+
+function closeTyping() {
+  $("typing").classList.remove("on");
+  $("typing-input").blur();
+  resetZoom();  // iOS can leave the page zoomed after typing
+}
+
+function submitTyping() {
+  const input = $("typing-input");
+  const text = input.value.trim();
+  if (!text) { input.focus(); return; }
+  if (!ws || ws.readyState !== WebSocket.OPEN) { $("typing-note").textContent = "Not connected yet..."; return; }
+  sendRelay({ t: "sig", kind: "text", text });
+  input.value = "";
+  $("typing-note").textContent = "Sent!";
+  input.focus();  // keep the keyboard up for the next try
+}
+$("typing-submit").addEventListener("click", submitTyping);
+$("typing-input").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); submitTyping(); } });
 
 // ---------------------------------------------------------------- direct link (WebRTC)
 // The relay only introduces phone and game; then they talk straight across the
@@ -334,9 +397,33 @@ for (const [name, bit] of Object.entries(BITS)) {
 }
 
 // ---------------------------------------------------------------- no zooming, scrolling or menus
+// iOS Safari ignores user-scalable=no, so block zoom gestures directly:
+// pinch (gesture*), double-tap (dblclick + a second quick touchend), and
+// if a zoom ever slips through, resetZoom() snaps it back to 1x.
 document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
-document.addEventListener("gesturestart", (e) => e.preventDefault());
+for (const g of ["gesturestart", "gesturechange", "gestureend"]) document.addEventListener(g, (e) => e.preventDefault(), { passive: false });
+document.addEventListener("dblclick", (e) => e.preventDefault(), { passive: false });
 document.addEventListener("contextmenu", (e) => e.preventDefault());
+let lastTouchEnd = 0;
+document.addEventListener("touchend", (e) => {
+  const now = Date.now();
+  if (now - lastTouchEnd < 350 && e.target.id !== "typing-input") e.preventDefault();  // 2nd quick tap = no zoom
+  lastTouchEnd = now;
+}, { passive: false });
+
+function resetZoom() {
+  const meta = $("viewport");
+  const content = "width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover";
+  meta.setAttribute("content", content + ", minimum-scale=1");
+  setTimeout(() => meta.setAttribute("content", content), 50);
+  window.scrollTo(0, 0);
+}
+window.addEventListener("orientationchange", () => setTimeout(resetZoom, 200));
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", () => {
+    if (window.visualViewport.scale > 1.01 && !$("typing").classList.contains("on")) resetZoom();
+  });
+}
 </script>
 </body>
 </html>
