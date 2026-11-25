@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta id="viewport" name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#1a1c2c">
-<title>Poké Party Controller</title>
+<title>Poke Party Controller</title>
 <style>
   :root { --player: #8b9bb4; --bg: #1a1c2c; --fg: #f4f4f4; }
   * { box-sizing: border-box; -webkit-user-select: none; user-select: none;
@@ -21,10 +21,10 @@
   #join.on { display: flex; flex-direction: column; align-items: center; justify-content: center;
       gap: 14px; padding: 16px; text-align: center; }
   #join h1 { margin: 0; font-size: 24px; }
-  #code { width: 6em; padding: 8px; border: 2px solid #566c86; border-radius: 10px; background: #000;
+  #code { width: 6em; padding: 8px; border: 2px solid #566c86; border-radius: 0; background: #000;
       color: var(--fg); font: 700 32px monospace; letter-spacing: 0.25em; text-align: center;
       text-transform: uppercase; -webkit-user-select: text; user-select: text; }
-  #join-btn { padding: 12px 36px; border: 0; border-radius: 12px; background: #e8423f; color: #fff;
+  #join-btn { padding: 12px 36px; border: 0; border-radius: 0; background: #e8423f; color: #fff;
       font: 700 20px system-ui, sans-serif; }
   #msg { min-height: 1.3em; color: #f2c230; }
 
@@ -57,16 +57,16 @@
       touch-action: manipulation; }
   #typing.on { display: flex; }
   #typing-prompt { font: 700 22px system-ui, sans-serif; text-align: center; }
-  #typing-input { width: min(90vw, 420px); padding: 12px; border: 3px solid var(--player); border-radius: 12px;
+  #typing-input { width: min(90vw, 420px); padding: 12px; border: 3px solid var(--player); border-radius: 0;
       background: #000; color: var(--fg); font: 700 28px monospace; letter-spacing: 0.12em; text-align: center;
       text-transform: uppercase; -webkit-user-select: text; user-select: text; }
-  #typing-submit { width: min(90vw, 420px); padding: 16px; border: 0; border-radius: 12px;
+  #typing-submit { width: min(90vw, 420px); padding: 16px; border: 0; border-radius: 0;
       background: var(--player); color: var(--bg); font: 800 24px system-ui, sans-serif; }
   #typing-note { min-height: 1.3em; color: #f2c230; font-size: 18px; text-align: center; }
   #typing-hint { opacity: 0.6; font-size: 14px; }
   /* Phones only open the keyboard after a tap (a page can't open it by
      itself), so a big blinking button asks for that tap. */
-  #typing-tap { width: min(90vw, 420px); padding: 18px; border-radius: 12px; background: var(--player);
+  #typing-tap { width: min(90vw, 420px); padding: 18px; border-radius: 0; background: var(--player);
       color: #000; font: 800 24px system-ui, sans-serif; text-align: center; animation: blink 1s infinite; }
   #typing.typing-active #typing-tap { display: none; }
   @keyframes blink { 50% { opacity: 0.55; } }
@@ -75,7 +75,7 @@
 </head>
 <body>
 <div id="join" class="screen on">
-  <h1>Poké Party</h1>
+  <h1>Poke Party</h1>
   <div>Enter the code on the big screen</div>
   <input id="code" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ABCD">
   <button id="join-btn">Join</button>
