@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta id="viewport" name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<meta name="theme-color" content="#1a1c2c">
+<meta name="theme-color" content="#19332d">
 <title>Poke Party Controller</title>
 <style>
-  :root { --player: #8b9bb4; --bg: #1a1c2c; --fg: #f4f4f4; }
+  :root { --player: #a8b5b2; --bg: #19332d; --fg: #ebede9; }
   * { box-sizing: border-box; -webkit-user-select: none; user-select: none;
       -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
   html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--fg);
@@ -21,12 +21,14 @@
   #join.on { display: flex; flex-direction: column; align-items: center; justify-content: center;
       gap: 14px; padding: 16px; text-align: center; }
   #join h1 { margin: 0; font-size: 24px; }
-  #code { width: 6em; padding: 8px; border: 2px solid #566c86; border-radius: 0; background: #000;
+  #code { width: 6em; padding: 8px; border: 2px solid #577277; border-radius: 0; background: #000;
       color: var(--fg); font: 700 32px monospace; letter-spacing: 0.25em; text-align: center;
       text-transform: uppercase; -webkit-user-select: text; user-select: text; }
-  #join-btn { padding: 12px 36px; border: 0; border-radius: 0; background: #e8423f; color: #fff;
+  #name { width: 9em; padding: 8px; border: 2px solid #577277; border-radius: 0; background: #000;
+      color: var(--fg); font: 700 22px system-ui, sans-serif; text-align: center; -webkit-user-select: text; user-select: text; }
+  #join-btn { padding: 12px 36px; border: 0; border-radius: 0; background: #cf573c; color: #fff;
       font: 700 20px system-ui, sans-serif; }
-  #msg { min-height: 1.3em; color: #f2c230; }
+  #msg { min-height: 1.3em; color: #e8c170; }
 
   #stick-zone { position: absolute; left: 0; top: 0; bottom: 0; width: 50%; }
   #stick-base, #stick-knob { position: absolute; display: none; border-radius: 50%;
@@ -62,7 +64,7 @@
       text-transform: uppercase; -webkit-user-select: text; user-select: text; }
   #typing-submit { width: min(90vw, 420px); padding: 16px; border: 0; border-radius: 0;
       background: var(--player); color: var(--bg); font: 800 24px system-ui, sans-serif; }
-  #typing-note { min-height: 1.3em; color: #f2c230; font-size: 18px; text-align: center; }
+  #typing-note { min-height: 1.3em; color: #e8c170; font-size: 18px; text-align: center; }
   #typing-hint { opacity: 0.6; font-size: 14px; }
   /* Phones only open the keyboard after a tap (a page can't open it by
      itself), so a big blinking button asks for that tap. */
@@ -78,6 +80,7 @@
   <h1>Poke Party</h1>
   <div>Enter the code on the big screen</div>
   <input id="code" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ABCD">
+  <input id="name" maxlength="8" autocomplete="off" autocorrect="off" autocapitalize="words" spellcheck="false" enterkeyhint="go" placeholder="Your name">
   <button id="join-btn">Join</button>
   <div id="msg"></div>
 </div>
@@ -105,7 +108,7 @@
   <div id="typing-hint">Tap the box to bring up your keyboard</div>
 </div>
 
-<div id="version">controller v5</div>
+<div id="version">controller v6</div>
 <script>
 // ---------------------------------------------------------------- settings
 const RELAY = "wss://barrelofmonkeys.cyberdetective.workers.dev";
@@ -139,12 +142,22 @@ if (codeFromUrl) $("code").value = codeFromUrl.toUpperCase();
 
 // ---------------------------------------------------------------- joining
 $("join-btn").addEventListener("click", join);
-$("code").addEventListener("keydown", (e) => { if (e.key === "Enter") join(); });
+$("code").addEventListener("keydown", (e) => { if (e.key === "Enter") { if ($("name").value) join(); else $("name").focus(); } });
+$("name").addEventListener("keydown", (e) => { if (e.key === "Enter") join(); });
+try { $("name").value = localStorage.getItem("sp-name") || ""; } catch (e) {}
+
+// The name goes to the game as a "sig" message, like typed answers.
+function sendName() {
+  const text = $("name").value.trim();
+  if (text) sendRelay({ t: "sig", kind: "name", text });
+}
 
 function join() {
   room = $("code").value.trim().toUpperCase();
   if (!/^[A-Z]{4}$/.test(room)) { $("msg").textContent = "Codes are 4 letters."; return; }
   $("code").blur();
+  $("name").blur();
+  try { localStorage.setItem("sp-name", $("name").value.trim()); } catch (e) {}
   resetZoom();
   $("join").classList.remove("on");
   $("pad").classList.add("on");
@@ -191,6 +204,7 @@ function connect() {
   ws.onopen = () => {
     lastKey = "";
     setStatus(playerText || "Connected");
+    sendName();
     if (!direct) startDirect();
   };
   ws.onmessage = (e) => onGameMessage(e.data);
@@ -210,7 +224,7 @@ function connect() {
 function onGameMessage(text) {
   let d;
   try { d = JSON.parse(text); } catch (err) { return; }
-  if (d.slot) { playerText = `You are P${d.slot}`; setStatus(playerText); }
+  if (d.slot) { playerText = d.name ? `${d.name} (P${d.slot})` : `You are P${d.slot}`; setStatus(playerText); }
   if (typeof d.note === "string") { playerText = d.note; setStatus(d.note); }
   if (d.color) document.documentElement.style.setProperty("--player", "#" + d.color);
   if (typeof d.pong === "number") { ping = Date.now() - d.pong; showLink(); }
