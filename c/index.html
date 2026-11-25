@@ -108,7 +108,7 @@
   <div id="typing-hint">Tap the box to bring up your keyboard</div>
 </div>
 
-<div id="version">controller v6</div>
+<div id="version">controller v7</div>
 <script>
 // ---------------------------------------------------------------- settings
 const RELAY = "wss://barrelofmonkeys.cyberdetective.workers.dev";
@@ -124,6 +124,7 @@ const STICK_RADIUS = 60;     // px of thumb travel for a full push
 const $ = (id) => document.getElementById(id);
 const state = { x: 0, y: 0, b: 0 };  // b bits: 1 move1, 2 move2, 4 move3, 8 confirm, 16 back
 let ws = null, room = "", retryTimer = 0, playerText = "";
+let lastPongAt = Date.now();
 let lastKey = "", lastRelayAt = 0, lastPingAt = 0, ping = null;
 let pc = null, dc = null, direct = false, noDirect = false, remoteReady = false, pendingIce = [];
 
@@ -201,7 +202,9 @@ function connect() {
   clearTimeout(retryTimer);
   setStatus("Connecting...");
   ws = new WebSocket(`${RELAY}/phone?room=${room}&id=${phoneId}`);
+  lastPongAt = Date.now();
   ws.onopen = () => {
+    lastPongAt = Date.now();
     lastKey = "";
     setStatus(playerText || "Connected");
     sendName();
@@ -227,7 +230,7 @@ function onGameMessage(text) {
   if (d.slot) { playerText = d.name ? `${d.name} (P${d.slot})` : `You are P${d.slot}`; setStatus(playerText); }
   if (typeof d.note === "string") { playerText = d.note; setStatus(d.note); }
   if (d.color) document.documentElement.style.setProperty("--player", "#" + d.color);
-  if (typeof d.pong === "number") { ping = Date.now() - d.pong; showLink(); }
+  if (typeof d.pong === "number") { lastPongAt = Date.now(); ping = Date.now() - d.pong; showLink(); }
   if (d.rtc === "off") { noDirect = true; closeDirect(); }  // this game build can't go direct
   if (d.type === "answer" && pc) {
     pc.setRemoteDescription({ type: "answer", sdp: d.sdp })
@@ -364,6 +367,23 @@ function flush(force) {
   lastRelayAt = now;
 }
 setInterval(() => flush(false), TICK_MS);
+
+// The game answers a ping every second. Nothing for a while = that link is dead,
+// even if it still says "open": drop the direct link first, then reconnect.
+setInterval(() => {
+  if (!room || document.visibilityState !== "visible") { lastPongAt = Date.now(); return; }
+  const quiet = Date.now() - lastPongAt;
+  if (direct && quiet > 4000) { closeDirect(); lastPongAt = Date.now(); return; }
+  if (!direct && ws && ws.readyState === WebSocket.OPEN && quiet > 9000) {
+    const old = ws;
+    old.onclose = null;
+    old.onmessage = null;
+    ws = null;
+    try { old.close(); } catch (e) {}
+    setStatus("Connection lost. Reconnecting...");
+    connect();
+  }
+}, 1000);
 
 // ---------------------------------------------------------------- joystick (appears under your thumb)
 const zone = $("stick-zone"), base = $("stick-base"), knob = $("stick-knob");
