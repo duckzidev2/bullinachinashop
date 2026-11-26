@@ -39,6 +39,32 @@
   #sound { position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); display: none;
       padding: 10px 24px; border: 0; border-radius: 0; background: #e8c170; color: #090a14;
       font: 700 18px system-ui, sans-serif; cursor: pointer; }
+  /* Playing: the keyboard / a gamepad on this computer is a controller. */
+  :root { --player: #a8b5b2; }
+  #play-panel { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: none;
+      flex-direction: column; align-items: center; gap: 12px; padding: 20px 24px; background: rgba(9, 10, 20, 0.92);
+      border: 2px solid #577277; text-align: center; z-index: 5; }
+  #play-panel.on { display: flex; }
+  #play-name { width: 9em; padding: 8px; border: 2px solid #577277; border-radius: 0; background: #000;
+      color: var(--fg); font: 700 22px system-ui, sans-serif; text-align: center; }
+  #play-go { padding: 10px 32px; border: 0; border-radius: 0; background: #cf573c; color: #fff;
+      font: 700 18px system-ui, sans-serif; cursor: pointer; }
+  #play-cancel { padding: 4px 12px; border: 0; border-radius: 0; background: #394a50; color: var(--fg);
+      font: 600 13px system-ui, sans-serif; cursor: pointer; }
+  .keys { font-size: 14px; line-height: 1.7; opacity: 0.85; }
+  .keys b { display: inline-block; min-width: 1.4em; padding: 0 4px; background: #394a50; }
+  #me { position: absolute; left: 8px; bottom: 6px; display: none; font-size: 13px; padding: 2px 8px;
+      background: rgba(9, 10, 20, 0.6); border-left: 4px solid var(--player); pointer-events: none; }
+  #me.on { display: block; }
+  #typing { position: absolute; left: 50%; bottom: 40px; transform: translateX(-50%); display: none;
+      flex-direction: column; align-items: center; gap: 8px; padding: 14px 18px; background: rgba(9, 10, 20, 0.92);
+      border: 3px solid var(--player); z-index: 6; }
+  #typing.on { display: flex; }
+  #typing-prompt { font: 700 18px system-ui, sans-serif; }
+  #typing-input { width: min(80vw, 420px); padding: 10px; border: 2px solid var(--player); border-radius: 0;
+      background: #000; color: var(--fg); font: 700 24px monospace; letter-spacing: 0.12em; text-align: center;
+      text-transform: uppercase; }
+  #typing-note { min-height: 1.2em; color: #e8c170; }
   #version { position: fixed; right: 6px; bottom: 4px; font-size: 11px; opacity: 0.4; pointer-events: none; z-index: 20; }
 </style>
 </head>
@@ -56,10 +82,27 @@
   <video id="video" autoplay playsinline></video>
   <div id="wait">Connecting...</div>
   <div id="hud"><span id="status">Connecting...</span></div>
-  <div id="bar"><button id="mute-btn">Sound on</button><button id="full-btn">Full screen</button><button id="leave-btn">Leave</button></div>
+  <div id="bar"><button id="play-btn">Play</button><button id="mute-btn">Sound on</button><button id="full-btn">Full screen</button><button id="leave-btn">Leave</button></div>
   <button id="sound">Click for sound</button>
+  <div id="me"><span id="me-status">Joining...</span> · <span id="me-ping">-- ms</span></div>
+  <div id="play-panel">
+    <div style="font-size:20px;font-weight:700">Play from this computer</div>
+    <input id="play-name" maxlength="8" autocomplete="off" spellcheck="false" placeholder="Your name">
+    <div class="keys">
+      Move <b>W</b><b>A</b><b>S</b><b>D</b> or arrows<br>
+      A <b>Space</b> / <b>Enter</b> &nbsp; X <b>J</b> &nbsp; Y <b>K</b> &nbsp; B <b>L</b> / <b>Backspace</b><br>
+      or use a controller
+    </div>
+    <button id="play-go">Join the game</button>
+    <button id="play-cancel">Just watch</button>
+  </div>
+  <div id="typing">
+    <div id="typing-prompt">Type your answer</div>
+    <input id="typing-input" autocomplete="off" spellcheck="false">
+    <div id="typing-note">Enter to send</div>
+  </div>
 </div>
-<div id="version">viewer v1</div>
+<div id="version">viewer v2</div>
 
 <script>
 const RELAY = "wss://barrelofmonkeys.cyberdetective.workers.dev";
@@ -93,6 +136,7 @@ function watch() {
 }
 
 function backToJoin(message) {
+  if (window.ppPlayer) ppPlayer.stop();
   room = "";
   clearTimeout(retryTimer);
   clearTimeout(askTimer);
@@ -259,6 +303,286 @@ addEventListener("keydown", wake);
 wake();
 
 if (fromUrl && /^[A-Z]{4}$/i.test(fromUrl)) $("code").focus();
+</script>
+
+<script>
+// ---------------------------------------------------------------- playing (controller)
+// The keyboard or a gamepad on this computer joins the game exactly like a phone
+// does (pokeparty.club/c): same relay, same messages, its own direct link for
+// button presses. The game can't tell the difference.
+window.ppPlayer = (() => {
+  const TICK_MS = 16;
+  const RELAY_MIN_MS = 33;
+  const PING_MS = 1000;
+  const DEADZONE = 0.2;
+  const BITS = { a: 32 | 8, x: 1, y: 2, b: 4 | 16 };  // A = interact + confirm, X/Y/B = moves 1-3, B is also back
+  const KEYS = {
+    KeyW: "up", ArrowUp: "up", KeyS: "down", ArrowDown: "down", KeyA: "left", ArrowLeft: "left", KeyD: "right", ArrowRight: "right",
+    Space: "a", Enter: "a", NumpadEnter: "a", KeyJ: "x", KeyZ: "x", KeyK: "y", KeyX: "y",
+    KeyL: "b", KeyC: "b", Backspace: "b", Escape: "b",
+  };
+
+  let on = false, pws = null, retry = 0, lastPongAt = Date.now();
+  let ppc = null, dc = null, direct = false, noDirect = false, ready = false, iceWait = [];
+  let directTriedAt = 0, directWait = 4000;
+  let lastKey = "", lastRelayAt = 0, lastPingAt = 0, ping = null, typing = false, padKey = "";
+  const held = new Set();
+
+  // A stable id, so a dropped connection rejoins as the same player.
+  let myId = Array.from(crypto.getRandomValues(new Uint8Array(10)), (n) => (n % 36).toString(36)).join("");
+  try { myId = localStorage.getItem("sp-pc-player-id") || myId; localStorage.setItem("sp-pc-player-id", myId); } catch (e) {}
+  try { $("play-name").value = localStorage.getItem("sp-name") || ""; } catch (e) {}
+
+  // --- the Play panel
+  $("play-btn").addEventListener("click", (e) => {
+    e.currentTarget.blur();  // Space must not click it again
+    if (on) { stop(); return; }
+    $("play-panel").classList.add("on");
+    $("play-name").focus();
+  });
+  $("play-cancel").addEventListener("click", () => $("play-panel").classList.remove("on"));
+  $("play-go").addEventListener("click", start);
+  $("play-name").addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Enter") start(); });
+
+  function start() {
+    if (!room) return;
+    try { localStorage.setItem("sp-name", $("play-name").value.trim()); } catch (e) {}
+    $("play-panel").classList.remove("on");
+    $("play-name").blur();
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    on = true;
+    $("play-btn").textContent = "Stop playing";
+    $("me").classList.add("on");
+    setMe("Joining...");
+    connect();
+  }
+
+  function stop() {
+    if (!on) return;
+    on = false;
+    clearTimeout(retry);
+    held.clear();
+    closeTyping();
+    if (pws) { pws.onclose = null; try { pws.close(); } catch (e) {} pws = null; }
+    closeDirect();
+    $("play-btn").textContent = "Play";
+    $("me").classList.remove("on");
+    document.documentElement.style.setProperty("--player", "#a8b5b2");
+  }
+
+  function setMe(t) { $("me-status").textContent = t; }
+  function showLink() { $("me-ping").textContent = `${direct ? "direct" : "relay"} · ${ping === null ? "--" : ping} ms`; }
+
+  // --- relay (joins as a phone)
+  function sendRelay(obj) { if (pws && pws.readyState === WebSocket.OPEN) pws.send(JSON.stringify(obj)); }
+
+  function connect() {
+    clearTimeout(retry);
+    const sock = new WebSocket(`${RELAY}/phone?room=${room}&id=${myId}`);
+    pws = sock;
+    lastPongAt = Date.now();
+    sock.onopen = () => {
+      lastPongAt = Date.now();
+      lastKey = "";
+      const name = $("play-name").value.trim();
+      if (name) sendRelay({ t: "sig", kind: "name", text: name });
+      if (!direct) startDirect();
+    };
+    sock.onmessage = (e) => onGameMessage(e.data);
+    sock.onclose = (e) => {
+      if (pws !== sock) return;
+      pws = null;
+      if (!on) return;
+      if (e.code === 4005) { stop(); setStatus("That game is full."); return; }
+      if (e.code === 4000) { setMe("Playing in another tab."); return; }
+      if (e.code === 4002) closeDirect();
+      setMe(e.code === 4002 || e.code === 4004 ? "Waiting for the game..." : "Connection lost. Reconnecting...");
+      retry = setTimeout(connect, 2000);
+    };
+  }
+
+  function onGameMessage(text) {
+    let d;
+    try { d = JSON.parse(text); } catch (err) { return; }
+    if (d.slot) setMe(d.name ? `${d.name} (P${d.slot})` : `You are P${d.slot}`);
+    if (typeof d.note === "string") setMe(d.note);
+    if (d.color) document.documentElement.style.setProperty("--player", "#" + d.color);
+    if (typeof d.pong === "number") { lastPongAt = Date.now(); ping = Date.now() - d.pong; showLink(); }
+    if (d.rtc === "off") { noDirect = true; closeDirect(); }
+    if (d.type === "answer" && ppc) {
+      ppc.setRemoteDescription({ type: "answer", sdp: d.sdp })
+        .then(() => { ready = true; iceWait.forEach(addIce); iceWait = []; })
+        .catch(closeDirect);
+    }
+    if (d.ice && ppc) { if (ready) addIce(d.ice); else iceWait.push(d.ice); }
+    if ("text_mode" in d) { if (d.text_mode) openTyping(d.text_mode); else closeTyping(); }
+    if (typeof d.text_note === "string") $("typing-note").textContent = d.text_note;
+  }
+
+  // --- direct link for the buttons
+  async function startDirect() {
+    if (noDirect || !window.RTCPeerConnection) return;
+    directTriedAt = Date.now();
+    closeDirect();
+    const myPc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    ppc = myPc;
+    dc = myPc.createDataChannel("input", { ordered: false, maxRetransmits: 0 });
+    dc.onopen = () => { if (ppc === myPc) { direct = true; directWait = 4000; showLink(); } };
+    dc.onclose = () => { if (ppc === myPc) { direct = false; showLink(); } };
+    dc.onmessage = (e) => onGameMessage(e.data);
+    let offerSent = false;
+    const early = [];
+    myPc.onicecandidate = (e) => {
+      if (!e.candidate || !e.candidate.candidate) return;
+      const ice = { media: e.candidate.sdpMid, index: e.candidate.sdpMLineIndex, name: e.candidate.candidate };
+      if (offerSent) sendRelay({ t: "sig", ice }); else early.push(ice);
+    };
+    myPc.onconnectionstatechange = () => {
+      if (ppc === myPc && (myPc.connectionState === "failed" || myPc.connectionState === "closed")) closeDirect();
+    };
+    try {
+      await myPc.setLocalDescription(await myPc.createOffer());
+      sendRelay({ t: "sig", type: "offer", sdp: myPc.localDescription.sdp });
+      offerSent = true;
+      early.forEach((ice) => sendRelay({ t: "sig", ice }));
+    } catch (err) {
+      closeDirect();
+    }
+  }
+
+  function addIce(c) { if (ppc) ppc.addIceCandidate({ candidate: c.name, sdpMid: c.media, sdpMLineIndex: c.index }).catch(() => {}); }
+
+  function closeDirect() {
+    const oldPc = ppc, oldDc = dc;
+    ppc = null; dc = null; direct = false; ready = false; iceWait = [];
+    if (oldDc) { try { oldDc.close(); } catch (e) {} }
+    if (oldPc) { try { oldPc.close(); } catch (e) {} }
+    showLink();
+  }
+
+  // --- keyboard and gamepads
+  // A clicked button keeps the focus, and Space would click it again: drop it.
+  document.addEventListener("click", (e) => { if (e.target.tagName === "BUTTON") e.target.blur(); }, true);
+  addEventListener("keydown", (e) => {
+    if (!on || typing || e.target.tagName === "INPUT") return;
+    const k = KEYS[e.code];
+    if (!k) return;
+    e.preventDefault();  // no scrolling with space / arrows, no "back" on Backspace
+    if (!held.has(k)) { held.add(k); flush(true); }
+  });
+  addEventListener("keyup", (e) => {
+    const k = KEYS[e.code];
+    if (k && held.delete(k)) flush(true);
+  });
+  addEventListener("blur", () => { if (held.size) { held.clear(); flush(true); } });
+
+  function read() {
+    let x = (held.has("right") ? 1 : 0) - (held.has("left") ? 1 : 0);
+    let y = (held.has("down") ? 1 : 0) - (held.has("up") ? 1 : 0);
+    let b = 0;
+    for (const n of ["a", "x", "y", "b"]) if (held.has(n)) b |= BITS[n];
+    if (!typing) {
+      for (const pad of (navigator.getGamepads ? navigator.getGamepads() : [])) {
+        if (!pad || !pad.connected) continue;
+        const btn = (i) => !!(pad.buttons[i] && pad.buttons[i].pressed);
+        const ax = pad.axes[0] || 0, ay = pad.axes[1] || 0;
+        if (Math.hypot(ax, ay) > DEADZONE) { x += ax; y += ay; }
+        x += (btn(15) ? 1 : 0) - (btn(14) ? 1 : 0);
+        y += (btn(13) ? 1 : 0) - (btn(12) ? 1 : 0);
+        if (btn(0)) b |= BITS.a;
+        if (btn(1)) b |= BITS.b;
+        if (btn(2)) b |= BITS.x;
+        if (btn(3)) b |= BITS.y;
+        if (btn(9)) b |= 8;  // Start = confirm
+      }
+    }
+    const len = Math.hypot(x, y);
+    if (len > 1) { x /= len; y /= len; }
+    return { x, y, b };
+  }
+
+  const round2 = (v) => Math.round(v * 100) / 100;
+  function flush(force) {
+    if (!on) return;
+    const now = Date.now();
+    const s = read();
+    const msg = { x: round2(s.x), y: round2(s.y), b: s.b };
+    const key = `${msg.x},${msg.y},${msg.b}`;
+    if (key !== padKey) { padKey = key; force = true; }  // every change goes out right away
+    if (now - lastPingAt >= PING_MS) { msg.p = now; lastPingAt = now; }
+    if (direct && dc && dc.readyState === "open") {
+      try { dc.send(JSON.stringify(msg)); } catch (e) {}
+      return;
+    }
+    if (!pws || pws.readyState !== WebSocket.OPEN) return;
+    const due = key !== lastKey && now - lastRelayAt >= RELAY_MIN_MS;
+    if (!force && !due && msg.p === undefined) return;
+    pws.send(JSON.stringify(msg));
+    lastKey = key;
+    lastRelayAt = now;
+  }
+  setInterval(() => flush(false), TICK_MS);
+
+  // Watchdog and direct retries (same as the phone page).
+  setInterval(() => {
+    if (!on) return;
+    const quiet = Date.now() - lastPongAt;
+    if (direct && quiet > 4000) { closeDirect(); lastPongAt = Date.now(); return; }
+    if (!direct && pws && pws.readyState === WebSocket.OPEN && quiet > 9000) {
+      const old = pws;
+      old.onclose = null;
+      pws = null;
+      try { old.close(); } catch (e) {}
+      setMe("Connection lost. Reconnecting...");
+      connect();
+      return;
+    }
+    if (direct || noDirect || !pws || pws.readyState !== WebSocket.OPEN) return;
+    const trying = ppc && (ppc.connectionState === "new" || ppc.connectionState === "connecting");
+    const since = Date.now() - directTriedAt;
+    if (trying && since < 10000) return;
+    if (since < directWait) return;
+    directWait = Math.min(directWait * 2, 30000);
+    startDirect();
+  }, 1000);
+
+  // --- typing games: a text box over the picture
+  function openTyping(cfg) {
+    const input = $("typing-input");
+    typing = true;
+    held.clear();
+    flush(true);
+    $("typing-prompt").textContent = cfg.prompt || "Type your answer";
+    input.maxLength = cfg.max || 12;
+    input.style.textTransform = cfg.free ? "none" : "uppercase";
+    input.style.letterSpacing = cfg.free ? "normal" : "0.12em";
+    input.style.fontSize = cfg.free ? "18px" : "24px";
+    input.type = cfg.secret ? "password" : "text";
+    input.value = "";
+    $("typing-note").textContent = "Enter to send";
+    $("typing").classList.add("on");
+    input.focus();
+  }
+  function closeTyping() {
+    typing = false;
+    $("typing").classList.remove("on");
+    $("typing-input").blur();
+  }
+  $("typing-input").addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const text = $("typing-input").value.trim();
+    if (!text) return;
+    sendRelay({ t: "sig", kind: "text", text });
+    $("typing-input").value = "";
+    $("typing-note").textContent = "Sent!";
+  });
+  // Clicking the picture while a text box is open puts the cursor back in it.
+  $("video").addEventListener("click", () => { if (typing) $("typing-input").focus(); });
+
+  return { stop };
+})();
 </script>
 </body>
 </html>
