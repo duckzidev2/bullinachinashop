@@ -108,7 +108,7 @@
   <div id="typing-hint">Tap the box to bring up your keyboard</div>
 </div>
 
-<div id="version">controller v7</div>
+<div id="version">controller v8</div>
 <script>
 // ---------------------------------------------------------------- settings
 const RELAY = "wss://barrelofmonkeys.cyberdetective.workers.dev";
@@ -127,6 +127,7 @@ let ws = null, room = "", retryTimer = 0, playerText = "";
 let lastPongAt = Date.now();
 let lastKey = "", lastRelayAt = 0, lastPingAt = 0, ping = null;
 let pc = null, dc = null, direct = false, noDirect = false, remoteReady = false, pendingIce = [];
+let directTriedAt = 0, directWait = 4000;  // retries: 4 s, then longer after each miss (30 s at most)
 
 // A stable id for this phone, so a dropped connection rejoins as the same player.
 function makeId() {
@@ -301,11 +302,12 @@ $("typing-input").addEventListener("keydown", (e) => { if (e.key === "Enter") { 
 // Wi-Fi. If that can't connect, the relay keeps working as before.
 async function startDirect() {
   if (noDirect || !window.RTCPeerConnection) return;
+  directTriedAt = Date.now();
   closeDirect();
   const myPc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
   pc = myPc;
   dc = myPc.createDataChannel("input", { ordered: false, maxRetransmits: 0 });
-  dc.onopen = () => { if (pc === myPc) { direct = true; showLink(); } };
+  dc.onopen = () => { if (pc === myPc) { direct = true; directWait = 4000; showLink(); } };
   dc.onclose = () => { if (pc === myPc) { direct = false; showLink(); } };
   dc.onmessage = (e) => onGameMessage(e.data);
 
@@ -383,6 +385,19 @@ setInterval(() => {
     setStatus("Connection lost. Reconnecting...");
     connect();
   }
+}, 1000);
+
+// On the relay (the direct link failed or dropped): keep trying to go direct,
+// so one hiccup doesn't mean lag for the rest of the game.
+setInterval(() => {
+  if (!room || direct || noDirect || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (document.visibilityState !== "visible") return;
+  const trying = pc && (pc.connectionState === "new" || pc.connectionState === "connecting");
+  const since = Date.now() - directTriedAt;
+  if (trying && since < 10000) return;  // still working on the last try
+  if (since < directWait) return;
+  directWait = Math.min(directWait * 2, 30000);
+  startDirect();
 }, 1000);
 
 // ---------------------------------------------------------------- joystick (appears under your thumb)

@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#19332d">
+<title>Poke Party Viewer</title>
+<style>
+  :root { --bg: #19332d; --fg: #ebede9; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--fg);
+      font-family: system-ui, sans-serif; }
+  .screen { position: fixed; inset: 0; display: none; }
+  .screen.on { display: block; }
+
+  #join.on { display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 14px; padding: 16px; text-align: center; }
+  #join h1 { margin: 0; font-size: 28px; }
+  #code { width: 6em; padding: 8px; border: 2px solid #577277; border-radius: 0; background: #000;
+      color: var(--fg); font: 700 32px monospace; letter-spacing: 0.25em; text-align: center;
+      text-transform: uppercase; }
+  #watch-btn { padding: 12px 36px; border: 0; border-radius: 0; background: #cf573c; color: #fff;
+      font: 700 20px system-ui, sans-serif; cursor: pointer; }
+  #msg { min-height: 1.3em; color: #e8c170; }
+  #tip { opacity: 0.7; font-size: 14px; max-width: 26em; }
+
+  #view { background: #090a14; }
+  #video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain;
+      image-rendering: pixelated; background: #090a14; }
+  #hud { position: absolute; left: 8px; top: 6px; font-size: 13px; padding: 2px 8px;
+      background: rgba(9, 10, 20, 0.6); transition: opacity 0.4s; pointer-events: none; }
+  #bar { position: absolute; right: 8px; top: 6px; display: flex; gap: 6px; transition: opacity 0.4s; }
+  #bar button { padding: 4px 10px; border: 0; border-radius: 0; background: #394a50; color: var(--fg);
+      font: 600 13px system-ui, sans-serif; cursor: pointer; }
+  #view.idle #hud, #view.idle #bar { opacity: 0; }
+  #view.idle { cursor: none; }
+  #wait { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      font-size: 22px; color: #e8c170; pointer-events: none; text-align: center; padding: 16px; }
+  #sound { position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); display: none;
+      padding: 10px 24px; border: 0; border-radius: 0; background: #e8c170; color: #090a14;
+      font: 700 18px system-ui, sans-serif; cursor: pointer; }
+  #version { position: fixed; right: 6px; bottom: 4px; font-size: 11px; opacity: 0.4; pointer-events: none; z-index: 20; }
+</style>
+</head>
+<body>
+<div id="join" class="screen on">
+  <h1>Poke Party</h1>
+  <div>Watch a game: enter the code on the big screen</div>
+  <input id="code" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ABCD">
+  <button id="watch-btn">Watch</button>
+  <div id="msg"></div>
+  <div id="tip">Playing from far away? Watch here, then join on your phone at pokeparty.club/c with the same code.</div>
+</div>
+
+<div id="view" class="screen">
+  <video id="video" autoplay playsinline></video>
+  <div id="wait">Connecting...</div>
+  <div id="hud"><span id="status">Connecting...</span></div>
+  <div id="bar"><button id="mute-btn">Sound on</button><button id="full-btn">Full screen</button><button id="leave-btn">Leave</button></div>
+  <button id="sound">Click for sound</button>
+</div>
+<div id="version">viewer v1</div>
+
+<script>
+const RELAY = "wss://barrelofmonkeys.cyberdetective.workers.dev";
+const ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
+const $ = (id) => document.getElementById(id);
+
+let ws = null, room = "", retryTimer = 0, askTimer = 0;
+let pc = null, offerN = -1, remoteReady = false, pendingIce = [];
+let live = false;
+
+const viewerId = Array.from(crypto.getRandomValues(new Uint8Array(12)), (n) => (n % 36).toString(36)).join("");
+
+// ---------------------------------------------------------------- join screen
+const fromUrl = new URLSearchParams(location.search).get("code") || "";
+try { $("code").value = (fromUrl || localStorage.getItem("sp-room") || "").toUpperCase(); } catch (e) {}
+$("code").addEventListener("input", () => { $("code").value = $("code").value.toUpperCase().replace(/[^A-Z]/g, ""); });
+$("code").addEventListener("keydown", (e) => { if (e.key === "Enter") watch(); });
+$("watch-btn").addEventListener("click", watch);
+
+function watch() {
+  const code = $("code").value.trim().toUpperCase();
+  if (!/^[A-Z]{4}$/.test(code)) { $("msg").textContent = "The code is 4 letters."; return; }
+  try { localStorage.setItem("sp-room", code); } catch (e) {}
+  room = code;
+  $("msg").textContent = "";
+  $("join").classList.remove("on");
+  $("view").classList.add("on");
+  $("video").muted = false;  // clicking Watch lets the page play sound
+  showWait("Connecting...");
+  connect();
+}
+
+function backToJoin(message) {
+  room = "";
+  clearTimeout(retryTimer);
+  clearTimeout(askTimer);
+  if (ws) { ws.onclose = null; try { ws.close(); } catch (e) {} ws = null; }
+  closeLink();
+  $("video").srcObject = null;
+  $("view").classList.remove("on");
+  $("join").classList.add("on");
+  $("msg").textContent = message || "";
+}
+
+// ---------------------------------------------------------------- relay
+function connect() {
+  clearTimeout(retryTimer);
+  setStatus("Connecting...");
+  const sock = new WebSocket(`${RELAY}/viewer?room=${room}&id=${viewerId}`);
+  ws = sock;
+  sock.onmessage = (e) => onGame(e.data);
+  sock.onopen = () => { setStatus(live ? "Live" : "Waiting for the game..."); if (!live) askSoon(5000); };
+  sock.onclose = (e) => {
+    if (ws !== sock) return;
+    ws = null;
+    if (!room) return;
+    if (e.code === 4004 && !live) return backToJoin("No game with that code. Check the big screen.");
+    if (e.code === 4005) return backToJoin("That game has as many viewers as it can take.");
+    if (e.code === 4000) return setStatus("Opened in another tab.");
+    if (!live) showWait(e.code === 4002 ? "The game closed. Waiting for it..." : "Connection lost. Reconnecting...");
+    retryTimer = setTimeout(connect, 2000);  // a stream that's already live keeps playing meanwhile
+  };
+}
+
+function send(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+
+// No picture after a while (or the link broke): ask the game for a fresh one.
+function askSoon(ms) {
+  clearTimeout(askTimer);
+  askTimer = setTimeout(() => {
+    if (!room || live) return;
+    send({ t: "sig", hello: true });
+    askSoon(8000);
+  }, ms);
+}
+
+async function onGame(text) {
+  let d;
+  try { d = JSON.parse(text); } catch (e) { return; }
+  if (d.type === "offer" && typeof d.sdp === "string") {
+    await answer(d);
+  } else if (d.ice && pc && d.n === offerN) {
+    if (remoteReady) addIce(d.ice); else pendingIce.push(d.ice);
+  }
+}
+
+// ---------------------------------------------------------------- the stream
+async function answer(d) {
+  closeLink();
+  const myPc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  pc = myPc;
+  offerN = d.n;
+  const stream = new MediaStream();
+  myPc.ontrack = (e) => {
+    try { e.receiver.playoutDelayHint = 0; } catch (err) {}     // as little buffering as possible
+    try { e.receiver.jitterBufferTarget = 0; } catch (err) {}
+    stream.addTrack(e.track);
+    const video = $("video");
+    if (video.srcObject !== stream) video.srcObject = stream;
+    video.play().catch(() => { video.muted = true; video.play().catch(() => {}); $("sound").style.display = "block"; showMute(); });
+  };
+  myPc.onicecandidate = (e) => { if (e.candidate && e.candidate.candidate) send({ t: "sig", ice: e.candidate.toJSON(), n: offerN }); };
+  myPc.onconnectionstatechange = () => {
+    if (pc !== myPc) return;
+    const s = myPc.connectionState;
+    if (s === "connected") { live = true; hideWait(); setStatus("Live"); }
+    if (s === "disconnected") setStatus("Picture lost. Waiting...");
+    if (s === "failed" || s === "closed") {
+      closeLink();
+      showWait("Picture lost. Reconnecting...");
+      askSoon(1500);
+    }
+  };
+  try {
+    await myPc.setRemoteDescription({ type: "offer", sdp: d.sdp });
+    remoteReady = true;
+    pendingIce.forEach(addIce);
+    pendingIce = [];
+    await myPc.setLocalDescription(await myPc.createAnswer());
+    send({ t: "sig", type: "answer", sdp: myPc.localDescription.sdp, n: offerN });
+    askSoon(12000);  // no picture by then: try again
+  } catch (err) {
+    closeLink();
+    askSoon(2000);
+  }
+}
+
+function addIce(c) {
+  if (pc) pc.addIceCandidate(c).catch(() => {});
+}
+
+function closeLink() {
+  const old = pc;
+  pc = null;
+  live = false;
+  remoteReady = false;
+  pendingIce = [];
+  if (old) { try { old.close(); } catch (e) {} }
+}
+
+// Ping to the game and the picture size, once a second.
+setInterval(async () => {
+  if (!pc || !live) return;
+  try {
+    const stats = await pc.getStats();
+    let rtt = null, w = 0, h = 0, fps = 0;
+    stats.forEach((s) => {
+      if (s.type === "candidate-pair" && s.nominated && s.currentRoundTripTime != null) rtt = s.currentRoundTripTime;
+      if (s.type === "inbound-rtp" && s.kind === "video") { w = s.frameWidth || 0; h = s.frameHeight || 0; fps = s.framesPerSecond || 0; }
+    });
+    const parts = ["Live"];
+    if (rtt != null) parts.push(`${Math.round(rtt * 1000)} ms`);
+    if (h) parts.push(`${h}p`);
+    if (fps) parts.push(`${Math.round(fps)} fps`);
+    setStatus(parts.join(" · "));
+  } catch (e) {}
+}, 1000);
+
+// ---------------------------------------------------------------- screen bits
+function setStatus(t) { $("status").textContent = t; }
+function showWait(t) { $("wait").textContent = t; $("wait").style.display = "flex"; }
+function hideWait() { $("wait").style.display = "none"; }
+function showMute() { $("mute-btn").textContent = $("video").muted ? "Sound on" : "Sound off"; }
+
+$("mute-btn").addEventListener("click", () => {
+  $("video").muted = !$("video").muted;
+  $("sound").style.display = "none";
+  $("video").play().catch(() => {});
+  showMute();
+});
+$("sound").addEventListener("click", () => {
+  $("video").muted = false;
+  $("video").play().catch(() => {});
+  $("sound").style.display = "none";
+  showMute();
+});
+function toggleFull() {
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  else $("view").requestFullscreen().catch(() => {});
+}
+$("full-btn").addEventListener("click", toggleFull);
+$("video").addEventListener("dblclick", toggleFull);
+$("leave-btn").addEventListener("click", () => backToJoin(""));
+showMute();
+
+// The buttons and status fade away while the mouse rests.
+let idleTimer = 0;
+function wake() {
+  $("view").classList.remove("idle");
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => $("view").classList.add("idle"), 2500);
+}
+addEventListener("mousemove", wake);
+addEventListener("keydown", wake);
+wake();
+
+if (fromUrl && /^[A-Z]{4}$/i.test(fromUrl)) $("code").focus();
+</script>
+</body>
+</html>
