@@ -8,7 +8,7 @@
 // this script its room with window.ppRoom = {code, key, relay} (autoload/net.gd).
 (() => {
   "use strict";
-  const ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
+  const STUN = [{ urls: ["stun:stun.cloudflare.com:3478", "stun:stun.l.google.com:19302"] }];
   const FPS = 30;
   const MAX_HEIGHT = 720;          // bigger canvases are scaled down before sending
   const MAX_BITRATE = 2500000;     // per viewer, bits per second
@@ -114,12 +114,30 @@
     v.pc.addIceCandidate(c).catch(() => {});
   }
 
+  // ------------------------------------------------------------ ICE servers
+  // STUN, plus a TURN relay from the relay server when it has one: many networks
+  // block a direct link between two computers, and TURN passes the picture then.
+  let ice = null, iceFor = "", iceAt = 0;
+  async function iceServers() {
+    const room = window.ppRoom;
+    if (!room) return STUN;
+    if (ice && iceFor === room.code && Date.now() - iceAt < 3600000) return ice;
+    try {
+      const r = await fetch(`${room.relay.replace(/^ws/, "http")}/ice?room=${room.code}`);
+      const j = await r.json();
+      if (Array.isArray(j.iceServers) && j.iceServers.length) { ice = j.iceServers; iceFor = room.code; iceAt = Date.now(); return ice; }
+    } catch (e) {}
+    return STUN;
+  }
+
   // ------------------------------------------------------------ one link per viewer
   async function offer(id) {
     drop(id);
     const video = pictureStream();
     if (!video) return;
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    const servers = await iceServers();
+    if (viewers.has(id)) return;  // a newer offer started meanwhile
+    const pc = new RTCPeerConnection({ iceServers: servers });
     const v = { pc, n: ++offers, ready: false, ice: [] };
     viewers.set(id, v);
     for (const t of video.getVideoTracks()) pc.addTrack(t, video);

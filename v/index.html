@@ -102,11 +102,23 @@
     <div id="typing-note">Enter to send</div>
   </div>
 </div>
-<div id="version">viewer v2</div>
+<div id="version">viewer v3</div>
 
 <script>
 const RELAY = "wss://barrelofmonkeys.cyberdetective.workers.dev";
-const ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
+const STUN = [{ urls: ["stun:stun.cloudflare.com:3478", "stun:stun.l.google.com:19302"] }];
+// STUN, plus a TURN relay when the relay server has one (some networks block direct links).
+let ice = null, iceFor = "";
+async function iceServers() {
+  if (ice && iceFor === room) return ice;
+  try {
+    const r = await fetch(`${RELAY.replace(/^ws/, "http")}/ice?room=${room}`);
+    const j = await r.json();
+    if (Array.isArray(j.iceServers) && j.iceServers.length) { ice = j.iceServers; iceFor = room; return ice; }
+  } catch (e) {}
+  return STUN;
+}
+let fails = 0;
 const $ = (id) => document.getElementById(id);
 
 let ws = null, room = "", retryTimer = 0, askTimer = 0;
@@ -187,7 +199,7 @@ async function onGame(text) {
   try { d = JSON.parse(text); } catch (e) { return; }
   if (d.type === "offer" && typeof d.sdp === "string") {
     await answer(d);
-  } else if (d.ice && pc && d.n === offerN) {
+  } else if (d.ice && d.n === offerN) {  // may arrive while the link is still being made
     if (remoteReady) addIce(d.ice); else pendingIce.push(d.ice);
   }
 }
@@ -195,9 +207,13 @@ async function onGame(text) {
 // ---------------------------------------------------------------- the stream
 async function answer(d) {
   closeLink();
-  const myPc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-  pc = myPc;
+  clearTimeout(askTimer);
   offerN = d.n;
+  setStatus("Found the game. Linking up...");
+  const servers = await iceServers();
+  if (offerN !== d.n) return;  // a newer offer got here first
+  const myPc = new RTCPeerConnection({ iceServers: servers });
+  pc = myPc;
   const stream = new MediaStream();
   myPc.ontrack = (e) => {
     try { e.receiver.playoutDelayHint = 0; } catch (err) {}     // as little buffering as possible
@@ -211,11 +227,14 @@ async function answer(d) {
   myPc.onconnectionstatechange = () => {
     if (pc !== myPc) return;
     const s = myPc.connectionState;
-    if (s === "connected") { live = true; hideWait(); setStatus("Live"); }
+    if (s === "connected") { live = true; fails = 0; hideWait(); setStatus("Live"); }
     if (s === "disconnected") setStatus("Picture lost. Waiting...");
     if (s === "failed" || s === "closed") {
+      const wasLive = live;
       closeLink();
-      showWait("Picture lost. Reconnecting...");
+      if (!wasLive) fails++;
+      showWait(wasLive ? "Picture lost. Reconnecting..." :
+        fails >= 2 ? "Can't link up with the game from this network. Still trying..." : "Linking up...");
       askSoon(1500);
     }
   };
@@ -226,7 +245,7 @@ async function answer(d) {
     pendingIce = [];
     await myPc.setLocalDescription(await myPc.createAnswer());
     send({ t: "sig", type: "answer", sdp: myPc.localDescription.sdp, n: offerN });
-    askSoon(12000);  // no picture by then: try again
+    askSoon(30000);  // no picture by then: try again (ICE fails by itself sooner when it can't link)
   } catch (err) {
     closeLink();
     askSoon(2000);
@@ -424,7 +443,7 @@ window.ppPlayer = (() => {
     if (noDirect || !window.RTCPeerConnection) return;
     directTriedAt = Date.now();
     closeDirect();
-    const myPc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    const myPc = new RTCPeerConnection({ iceServers: STUN });
     ppc = myPc;
     dc = myPc.createDataChannel("input", { ordered: false, maxRetransmits: 0 });
     dc.onopen = () => { if (ppc === myPc) { direct = true; directWait = 4000; showLink(); } };
