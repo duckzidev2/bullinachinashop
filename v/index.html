@@ -102,7 +102,7 @@
     <div id="typing-note">Enter to send</div>
   </div>
 </div>
-<div id="version">viewer v3</div>
+<div id="version">viewer v4</div>
 
 <script>
 const RELAY = "wss://barrelofmonkeys.cyberdetective.workers.dev";
@@ -224,6 +224,9 @@ async function answer(d) {
     video.play().catch(() => { video.muted = true; video.play().catch(() => {}); $("sound").style.display = "block"; showMute(); });
   };
   myPc.onicecandidate = (e) => { if (e.candidate && e.candidate.candidate) send({ t: "sig", ice: e.candidate.toJSON(), n: offerN }); };
+  myPc.oniceconnectionstatechange = () => {
+    if (pc === myPc && !live) setStatus(`Found the game. Linking up... (${myPc.iceConnectionState})`);
+  };
   myPc.onconnectionstatechange = () => {
     if (pc !== myPc) return;
     const s = myPc.connectionState;
